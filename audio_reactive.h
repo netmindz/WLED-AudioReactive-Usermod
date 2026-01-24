@@ -97,6 +97,14 @@
 #endif
 #endif
 
+// WLED does not have WLED-MM's USER_PRINT* macros
+#ifndef USER_PRINT
+  #define USER_PRINT(x) DEBUGSR_PRINT(x)
+  #define USER_PRINTLN(x) DEBUGSR_PRINTLN(x)
+  #define USER_PRINTF(x...) DEBUGSR_PRINTF(x)
+  #define USER_FLUSH()
+#endif
+
 #if defined(MIC_LOGGER) || defined(FFT_SAMPLING_LOG)
   #define PLOT_PRINT(x) DEBUGOUT(x)
   #define PLOT_PRINTLN(x) DEBUGOUTLN(x)
@@ -279,7 +287,6 @@ static volatile float    micReal_max2 = 0.0f;             // MicIn data max afte
 ////////////////////
 
 // some prototypes, to ensure consistent interfaces
-static float mapf(float x, float in_min, float in_max, float out_min, float out_max); // map function for float
 static float fftAddAvg(int from, int to);   // average of several FFT result bins
 void FFTcode(void * parameter);             // audio processing task: read samples, run FFT, fill GEQ channels from FFT results
 static void runMicFilter(uint16_t numSamples, float *sampleBuffer);          // pre-filtering of raw samples (band-pass)
@@ -412,11 +419,6 @@ constexpr float binWidth = SAMPLE_RATE / (float)samplesFFT; // frequency range o
 #include <arduinoFFT.h>
 
 // Helper functions
-
-// float version of map()
-static float mapf(float x, float in_min, float in_max, float out_min, float out_max){
-  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
-}
 
 // compute average of several FFT result bins
 // linear average
@@ -2554,7 +2556,7 @@ class AudioReactive : public Usermod {
       // better would be for AudioSource to implement getType()
       if (enabled
           && dmType == 0 && audioPin>=0
-          && (buttonType[b] == BTN_TYPE_ANALOG || buttonType[b] == BTN_TYPE_ANALOG_INVERTED)
+          && (buttons[b].type == BTN_TYPE_ANALOG || buttons[b].type == BTN_TYPE_ANALOG_INVERTED)
          ) {
         return true;
       }
