@@ -420,21 +420,145 @@ void AudioProcessor::limitGEQDynamics(bool gotNewSample) {
 void AudioProcessor::processSamples(float* samples, size_t count) {
     if (!m_initialized || !samples || count == 0) return;
 
-    // This is a simplified version
-    // Full implementation would:
-    // 1. Copy samples to FFT buffer
-    // 2. Apply windowing function
-    // 3. Run FFT
-    // 4. Calculate magnitude
-    // 5. Find major peak frequency
-    // 6. Compute frequency bands
-    // 7. Post-process results
+    // Ensure we have the right buffer size
+    if (count != m_config.fftSize) {
+        // Only process if we have exactly fftSize samples
+        return;
+    }
 
-    // For now, just compute frequency bands from existing FFT results
+#ifdef ARDUINO_ARCH_ESP32
+    // Copy samples to FFT buffer
+    memcpy(m_vReal, samples, sizeof(float) * count);
+
+    // Set imaginary parts to 0
+    memset(m_vImag, 0, sizeof(float) * m_config.fftSize);
+
+    // Apply filters if configured
+    if (m_audioFilters && m_config.useInputFilter > 0) {
+        m_audioFilters->applyFilter(count, m_vReal);
+    }
+
+    // Find max sample and count zero crossings
+    float maxSample = 0.0f;
+    uint_fast16_t newZeroCrossingCount = 0;
+    for (int i = 0; i < m_config.fftSize; i++) {
+        if ((m_vReal[i] <= (INT16_MAX - 1024)) && (m_vReal[i] >= (INT16_MIN + 1024))) {
+            if (fabsf(m_vReal[i]) > maxSample) maxSample = fabsf(m_vReal[i]);
+        }
+
+        if (i < (m_config.fftSize - 1)) {
+            if (__builtin_signbit(m_vReal[i]) != __builtin_signbit(m_vReal[i+1]))
+                newZeroCrossingCount++;
+        }
+    }
+    m_zeroCrossingCount = (newZeroCrossingCount * 2) / 3;
+
+    // Update AGC with max sample
+    if (m_agcController) {
+        m_agcController->processSample(maxSample);
+    }
+
+    float wc = 1.0f;  // Window correction factor
     bool noiseGateOpen = m_agcController ? (m_agcController->getSampleAGC() > 10) : true;
-    float wc = 1.0f; // Window correction factor
+
+    // Run FFT if noise gate is open
+    if (noiseGateOpen) {
+        // Create FFT object for this processing
+        ArduinoFFT<float> FFT = ArduinoFFT<float>(m_vReal, m_vImag, m_config.fftSize, m_config.sampleRate, true);
+
+        // Apply DC removal
+        FFT.dcRemoval();
+
+        // Apply windowing based on config
+        switch(m_config.fftWindow) {
+            case 1:
+                FFT.windowing(FFTWindow::Hann, FFTDirection::Forward);
+                wc = 0.66415918066f;
+                break;
+            case 2:
+                FFT.windowing(FFTWindow::Nuttall, FFTDirection::Forward);
+                wc = 0.9916873881f;
+                break;
+            case 3:
+                FFT.windowing(FFTWindow::Hamming, FFTDirection::Forward);
+                wc = 0.664159180663f;
+                break;
+            case 4:
+                FFT.windowing(FFTWindow::Flat_top, FFTDirection::Forward);
+                wc = 1.276771793156f;
+                break;
+            case 5:
+                FFT.windowing(FFTWindow::Blackman, FFTDirection::Forward);
+                wc = 0.84762867875f;
+                break;
+            default:
+                FFT.windowing(FFTWindow::Blackman_Harris, FFTDirection::Forward);
+                wc = 1.0f;
+                break;
+        }
+
+        // Compute FFT
+        FFT.compute(FFTDirection::Forward);
+        FFT.complexToMagnitude();
+        m_vReal[0] = 0;  // Eliminate DC offset spike
+
+        // Find major peak
+        float last_majorpeak = m_fftMajorPeak;
+        float last_magnitude = m_fftMagnitude;
+
+        #if !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(CONFIG_IDF_TARGET_ESP32C3)
+        // Apply pink noise scaling for peak detection
+        if (m_pinkFactors) {
+            for (uint_fast16_t binInd = 0; binInd < m_config.fftSize; binInd++)
+                m_vReal[binInd] *= m_pinkFactors[binInd];
+        }
+        #endif
+
+        FFT.majorPeak(m_fftMajorPeak, m_fftMagnitude);
+        m_fftMagnitude *= wc;
+
+        if (m_fftMajorPeak < ((float)m_config.sampleRate / m_config.fftSize)) {
+            m_fftMajorPeak = 1.0f;
+            m_fftMagnitude = 0.0f;
+        }
+        if (m_fftMajorPeak > (0.42f * m_config.sampleRate)) {
+            m_fftMajorPeak = last_majorpeak;
+            m_fftMagnitude = last_magnitude;
+        }
+
+        #if !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(CONFIG_IDF_TARGET_ESP32C3)
+        // Undo pink noise scaling
+        if (m_pinkFactors) {
+            for (uint_fast16_t binInd = 0; binInd < m_config.fftSize; binInd++)
+                m_vReal[binInd] /= m_pinkFactors[binInd];
+
+            // Fix peak magnitude
+            if ((m_fftMajorPeak > 10.0f) && (m_fftMajorPeak < (m_config.sampleRate/2.2f)) && (m_fftMagnitude > 4.0f)) {
+                float binWidth = (float)m_config.sampleRate / m_config.fftSize;
+                unsigned peakBin = constrain((int)((m_fftMajorPeak + binWidth/2.0f) / binWidth), 0, m_config.fftSize - 1);
+                m_fftMagnitude *= fmaxf(1.0f / m_pinkFactors[peakBin], 1.0f);
+            }
+        }
+        #endif
+
+        m_fftMajorPeak = constrain(m_fftMajorPeak, 1.0f, 11025.0f);
+    } else {
+        // Noise gate closed
+        m_fftMajorPeak = 1.0f;
+        m_fftMagnitude = 0.001f;
+    }
+
+    // Scale FFT results
+    for (int i = 0; i < m_config.fftSize; i++) {
+        float t = fabsf(m_vReal[i]);
+        m_vReal[i] = t / 16.0f;
+    }
+
+    // Compute frequency bands and post-process
     computeFrequencyBands(noiseGateOpen, false, wc);
     postProcessFFT(noiseGateOpen, false);
+
+    // Detect peaks
     detectPeak();
 
     // Update volume tracking
@@ -442,6 +566,14 @@ void AudioProcessor::processSamples(float* samples, size_t count) {
         m_volumeSmth = m_agcController->getSampleAGC();
         m_volumeRaw = m_agcController->getSampleRaw();
     }
+#else
+    // Non-ESP32 platforms: basic processing only
+    bool noiseGateOpen = m_agcController ? (m_agcController->getSampleAGC() > 10) : true;
+    float wc = 1.0f;
+    computeFrequencyBands(noiseGateOpen, false, wc);
+    postProcessFFT(noiseGateOpen, false);
+    detectPeak();
+#endif
 }
 
 #ifdef ARDUINO_ARCH_ESP32
