@@ -18,6 +18,9 @@
 #define sqrt(x) sqrtf(x)        // Optimization for ESP32
 #define sqrt_internal sqrtf
 #include <arduinoFFT.h>
+#if defined(WLED_DEBUG) || defined(SR_DEBUG) || defined(SR_STATS)
+#include <esp_timer.h>
+#endif
 #endif
 
 // Helper function for float mapping
@@ -361,13 +364,13 @@ void AudioProcessor::limitSampleDynamics(float& volumeSmth) {
 
     float deltaSample = volumeSmth - m_lastVolumeSmth;
 
-    // Apply attack limiting
-    if (m_config.decayTime > 0) {  // Note: Using decayTime for attack per original code
-        float maxAttack = bigChange * float(delta_time) / float(m_config.decayTime);
+    // Attack limiting (matches main:1625-1628)
+    if (m_config.attackTime > 0) {
+        float maxAttack = bigChange * float(delta_time) / float(m_config.attackTime);
         if (deltaSample > maxAttack) deltaSample = maxAttack;
     }
 
-    // Apply decay limiting
+    // Decay limiting (matches main:1629-1632)
     if (m_config.decayTime > 0) {
         float maxDecay = -bigChange * float(delta_time) / float(m_config.decayTime);
         if (deltaSample < maxDecay) deltaSample = maxDecay;
@@ -542,6 +545,8 @@ void AudioProcessor::processSamples(float* samples, size_t count) {
         #endif
 
         m_fftMajorPeak = constrain(m_fftMajorPeak, 1.0f, 11025.0f);
+        // exponentially smooth peak (matches main:797 — "swooping peak")
+        m_fftMajorPeakSmth = m_fftMajorPeakSmth + 0.42f * (m_fftMajorPeak - m_fftMajorPeakSmth);
     } else {
         // Noise gate closed
         m_fftMajorPeak = 1.0f;
@@ -560,6 +565,9 @@ void AudioProcessor::processSamples(float* samples, size_t count) {
 
     // Detect peaks
     detectPeak();
+
+    // Mark new FFT result available (for FASTPATH UDP-send latency reduction)
+    m_haveNewFFTResult = true;
 
     // Update volume tracking
     if (m_agcController) {
@@ -658,6 +666,19 @@ void AudioProcessor::fftTask() {
     while (true) {
         delay(1);  // Give IDLE task time and keep watchdog happy
 
+        #if defined(WLED_DEBUG) || defined(SR_DEBUG) || defined(SR_STATS)
+        uint64_t cycleStart = esp_timer_get_time();
+        static uint64_t lastCycleStart = 0;
+        static uint64_t lastLastCycleTime = 0;
+        if ((lastCycleStart > 0) && (cycleStart > lastCycleStart)) {
+            uint64_t taskTimeInMillis = ((cycleStart - lastCycleStart) + 5ULL) / 10ULL;
+            m_stats.fftTaskCycle = (((taskTimeInMillis + lastLastCycleTime) / 2) * 4 + m_stats.fftTaskCycle * 6) / 10.0f;
+            lastLastCycleTime = taskTimeInMillis;
+        }
+        lastCycleStart = cycleStart;
+        uint64_t start = cycleStart;
+        #endif
+
         // Get fresh samples from audio source
         memset(m_vReal, 0, sizeof(float) * m_config.fftSize);
 
@@ -683,7 +704,15 @@ void AudioProcessor::fftTask() {
         xLastWakeTime = xTaskGetTickCount();
         isFirstRun = !isFirstRun;
 
-        // Apply filters if available
+        #if defined(WLED_DEBUG) || defined(SR_DEBUG) || defined(SR_STATS)
+        if (start < esp_timer_get_time()) {
+            uint64_t t = (esp_timer_get_time() - start + 5ULL) / 10ULL;
+            m_stats.sampleTime = (t * 3 + m_stats.sampleTime * 7) / 10.0f;
+        }
+        start = esp_timer_get_time();
+        #endif
+
+        // Determine which samples need filtering (in sliding window mode, only the new half)
         float *samplesStart = m_vReal;
         uint16_t sampleCount = m_config.fftSize;
         #ifdef FFT_USE_SLIDING_WINDOW
@@ -693,11 +722,20 @@ void AudioProcessor::fftTask() {
         }
         #endif
 
+        // Apply input filters (PDM bandpass or DC blocker) — sets doDCRemoval=false when a filter runs
         bool doDCRemoval = true;
         if (m_audioFilters && m_config.useInputFilter > 0) {
-            // Apply filters through AudioFilters component
+            m_audioFilters->applyFilter(sampleCount, samplesStart);
             doDCRemoval = false;
         }
+
+        #if defined(WLED_DEBUG) || defined(SR_DEBUG) || defined(SR_STATS)
+        if (start < esp_timer_get_time()) {
+            uint64_t t = (esp_timer_get_time() - start + 5ULL) / 10ULL;
+            m_stats.filterTime = (t * 3 + m_stats.filterTime * 7) / 10.0f;
+        }
+        start = esp_timer_get_time();
+        #endif
 
         // Set imaginary parts to 0
         memset(m_vImag, 0, sizeof(float) * m_config.fftSize);
@@ -730,9 +768,14 @@ void AudioProcessor::fftTask() {
         }
         m_zeroCrossingCount = (newZeroCrossingCount * 2) / 3;
 
-        // Update volume tracking with max sample
+        // Release peak sample to AGC / volume tracking
         if (m_agcController) {
-            // AGC would update based on maxSample
+            m_agcController->processSample(maxSample);
+            m_volumeSmth = m_agcController->getSampleAGC();
+            m_volumeRaw  = (uint16_t)m_agcController->getSampleRaw();
+        } else {
+            m_volumeSmth = maxSample;
+            m_volumeRaw  = (uint16_t)maxSample;
         }
 
         float wc = 1.0f;  // Window correction factor
@@ -785,6 +828,13 @@ void AudioProcessor::fftTask() {
             FFT.complexToMagnitude();
             m_vReal[0] = 0;  // Eliminate DC offset spike
 
+            #if defined(WLED_DEBUG) || defined(SR_DEBUG) || defined(SR_STATS)
+            if (start < esp_timer_get_time()) {
+                uint64_t t = (esp_timer_get_time() - start + 5ULL) / 10ULL;
+                m_stats.fftTime = (t * 3 + m_stats.fftTime * 7) / 10.0f;
+            }
+            #endif
+
             // Find major peak
             float last_majorpeak = m_fftMajorPeak;
             float last_magnitude = m_fftMagnitude;
@@ -825,6 +875,8 @@ void AudioProcessor::fftTask() {
             #endif
 
             m_fftMajorPeak = constrain(m_fftMajorPeak, 1.0f, 11025.0f);
+            // exponentially smooth peak (matches main:797 — "swooping peak")
+            m_fftMajorPeakSmth = m_fftMajorPeakSmth + 0.42f * (m_fftMajorPeak - m_fftMajorPeakSmth);
             #endif
         } else {
             // Noise gate closed
@@ -847,6 +899,8 @@ void AudioProcessor::fftTask() {
         detectPeak();
         autoResetPeak(50);
 
+        // Mark new FFT result available (for FASTPATH UDP-send latency reduction)
+        m_haveNewFFTResult = true;
         // Sleep until next cycle
         #ifdef FFT_USE_SLIDING_WINDOW
         if (!usingOldSamples) {

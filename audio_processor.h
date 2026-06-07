@@ -53,7 +53,8 @@ public:
         uint8_t inputLevel = 128;              // Input level (0-255)
         uint8_t sampleGain = 60;               // Sample gain (0-255)
         bool limiterOn = true;                 // Enable limiter/smoothing
-        uint16_t decayTime = 2000;             // Decay time in ms
+        uint16_t attackTime = 50;              // Attack time in ms (matches main:attackTime)
+        uint16_t decayTime = 300;              // Decay time in ms (matches main:decayTime)
         uint8_t useInputFilter = 0;            // 0=none, 1=bandpass, 2=DC blocker
     };
 
@@ -133,10 +134,39 @@ public:
     const uint8_t* getFFTResult() const { return m_fftResult; }
 
     /**
+     * @brief Get raw FFT calc array (pre-limiter, float, pre-clamp)
+     * @return Pointer to FFT calc array [NUM_GEQ_CHANNELS]
+     */
+    const float* getFFTCalc() const { return m_fftCalc; }
+
+    /**
+     * @brief Get smoothed FFT average array (post-limiter)
+     * @return Pointer to FFT avg array [NUM_GEQ_CHANNELS]
+     */
+    const float* getFFTAvg() const { return m_fftAvg; }
+
+    /**
+     * @brief Whether a fresh FFT result has been produced since last consumed
+     * @return true if a new FFT result is pending
+     */
+    bool hasNewFFTResult() const { return m_haveNewFFTResult; }
+
+    /**
+     * @brief Acknowledge consumption of the latest FFT result
+     */
+    void clearNewFFTResult() { m_haveNewFFTResult = false; }
+
+    /**
      * @brief Get major peak frequency
      * @return Frequency in Hz
      */
     float getMajorPeak() const { return m_fftMajorPeak; }
+
+    /**
+     * @brief Get smoothed major peak frequency (exponentially smoothed)
+     * @return Smoothed frequency in Hz
+     */
+    float getMajorPeakSmooth() const { return m_fftMajorPeakSmth; }
 
     /**
      * @brief Get FFT magnitude
@@ -198,6 +228,7 @@ public:
         float fftTaskCycle;   // Average FFT task cycle time
         float fftTime;        // Average FFT computation time
         float sampleTime;     // Average sample read time
+        float filterTime;     // Average audio filter time
     };
     const Stats& getStats() const { return m_stats; }
 
@@ -229,8 +260,10 @@ private:
 
     // Peak detection
     float m_fftMajorPeak = 1.0f;
+    float m_fftMajorPeakSmth = 1.0f;     // exponentially-smoothed major peak (matches main:FFT_MajPeakSmth)
     float m_fftMagnitude = 0.0f;
     bool m_samplePeak = false;
+    bool m_haveNewFFTResult = false;     // set true when a fresh FFT batch is ready
     unsigned long m_timeOfPeak = 0;
 
     // Volume tracking
