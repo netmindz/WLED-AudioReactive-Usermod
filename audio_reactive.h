@@ -82,6 +82,30 @@
 #include "audio_source.h"
 #include "audio_sync.h"
 
+/* ---------------------------------------------------------------------------
+ * WLEDPinAllocator — concrete IPinAllocator backed by WLED's PinManager.
+ *
+ * This is the only place in the OO library that touches PinManager /
+ * PinOwner directly; audio_source.h is kept free of those symbols.
+ * ---------------------------------------------------------------------------*/
+class WLEDPinAllocator : public IPinAllocator {
+public:
+    bool allocatePin(int8_t pin, bool output) override {
+        return PinManager::allocatePin(pin, output, PinOwner::UM_Audioreactive);
+    }
+    void deallocatePin(int8_t pin) override {
+        PinManager::deallocatePin(pin, PinOwner::UM_Audioreactive);
+    }
+    bool joinWire(int8_t sda, int8_t scl) override {
+#ifdef WLEDMM
+        return PinManager::joinWire(sda, scl);
+#else
+        (void)sda; (void)scl;
+        return true;
+#endif
+    }
+};
+
 #ifdef ARDUINO_ARCH_ESP32
 #include <driver/i2s.h>
 #include <driver/adc.h>
@@ -226,6 +250,7 @@ static void autoResetPeak(void) {
 class AudioReactive : public Usermod {
   private:
     // Audio processing library instances
+    WLEDPinAllocator m_pinAllocator;   // concrete IPinAllocator backed by WLED PinManager
     AudioFilters audioFilters;
     AGCController agcController;
     AudioProcessor audioProcessor;
@@ -526,33 +551,33 @@ inline void AudioReactive::createAudioSource() {
         #endif
         case 1:
             DEBUGSR_PRINT(F("AR: Generic I2S Microphone - ")); DEBUGSR_PRINTLN(F(I2S_MIC_CHANNEL_TEXT));
-            audioSource = new I2SSource(SAMPLE_RATE, BLOCK_SIZE);
+            audioSource = new I2SSource(SAMPLE_RATE, BLOCK_SIZE, 1.0f, true, &m_pinAllocator);
             delay(100);
             if (audioSource) audioSource->initialize(i2swsPin, i2ssdPin, i2sckPin);
             break;
 
         case 2:
             DEBUGSR_PRINTLN(F("AR: ES7243 Microphone (right channel only)."));
-            audioSource = new ES7243(SAMPLE_RATE, BLOCK_SIZE);
-            delay(100);
-            // Align global I2C pins (matches main:2003-2008)
+            // Align global I2C pins (matches main:2003-2008) before passing to constructor
             if ((sdaPin >= 0) && (i2c_sda < 0)) i2c_sda = sdaPin;
             if ((sclPin >= 0) && (i2c_scl < 0)) i2c_scl = sclPin;
             if (i2c_sda >= 0) sdaPin = -1;
             if (i2c_scl >= 0) sclPin = -1;
+            audioSource = new ES7243(SAMPLE_RATE, BLOCK_SIZE, 1.0f, true, i2c_sda, i2c_scl, &m_pinAllocator);
+            delay(100);
             if (audioSource) audioSource->initialize(i2swsPin, i2ssdPin, i2sckPin, mclkPin);
             break;
 
         case 3:
             DEBUGSR_PRINT(F("AR: SPH0645 Microphone - ")); DEBUGSR_PRINTLN(F(I2S_MIC_CHANNEL_TEXT));
-            audioSource = new SPH0654(SAMPLE_RATE, BLOCK_SIZE);
+            audioSource = new SPH0654(SAMPLE_RATE, BLOCK_SIZE, 1.0f, true, &m_pinAllocator);
             delay(100);
             if (audioSource) audioSource->initialize(i2swsPin, i2ssdPin, i2sckPin);
             break;
 
         case 4:
             DEBUGSR_PRINT(F("AR: Generic I2S Microphone with Master Clock - ")); DEBUGSR_PRINTLN(F(I2S_MIC_CHANNEL_TEXT));
-            audioSource = new I2SSource(SAMPLE_RATE, BLOCK_SIZE, 1.0f/24.0f);
+            audioSource = new I2SSource(SAMPLE_RATE, BLOCK_SIZE, 1.0f/24.0f, true, &m_pinAllocator);
             delay(100);
             if (audioSource) audioSource->initialize(i2swsPin, i2ssdPin, i2sckPin, mclkPin);
             break;
@@ -560,14 +585,14 @@ inline void AudioReactive::createAudioSource() {
         #if !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(CONFIG_IDF_TARGET_ESP32C3)
         case 5:
             DEBUGSR_PRINT(F("AR: I2S PDM Microphone - ")); DEBUGSR_PRINTLN(F(I2S_PDM_MIC_CHANNEL_TEXT));
-            audioSource = new I2SSource(SAMPLE_RATE, BLOCK_SIZE, 1.0f/4.0f);
+            audioSource = new I2SSource(SAMPLE_RATE, BLOCK_SIZE, 1.0f/4.0f, true, &m_pinAllocator);
             delay(100);
             if (audioSource) audioSource->initialize(i2swsPin, i2ssdPin);
             break;
 
         case 51:
             DEBUGSR_PRINT(F("AR: Legacy PDM Microphone - ")); DEBUGSR_PRINTLN(F(I2S_PDM_MIC_CHANNEL_TEXT));
-            audioSource = new I2SSource(SAMPLE_RATE, BLOCK_SIZE, 1.0f);
+            audioSource = new I2SSource(SAMPLE_RATE, BLOCK_SIZE, 1.0f, true, &m_pinAllocator);
             delay(100);
             if (audioSource) audioSource->initialize(i2swsPin, i2ssdPin);
             break;
@@ -579,12 +604,12 @@ inline void AudioReactive::createAudioSource() {
             #else
             DEBUGSR_PRINTLN(F("AR: ES8388 Source (Line-In)"));
             #endif
-            audioSource = new ES8388Source(SAMPLE_RATE, BLOCK_SIZE, 1.0f);
-            delay(100);
             if ((sdaPin >= 0) && (i2c_sda < 0)) i2c_sda = sdaPin;
             if ((sclPin >= 0) && (i2c_scl < 0)) i2c_scl = sclPin;
             if (i2c_sda >= 0) sdaPin = -1;
             if (i2c_scl >= 0) sclPin = -1;
+            audioSource = new ES8388Source(SAMPLE_RATE, BLOCK_SIZE, 1.0f, true, i2c_sda, i2c_scl, &m_pinAllocator);
+            delay(100);
             if (audioSource) audioSource->initialize(i2swsPin, i2ssdPin, i2sckPin, mclkPin);
             break;
 
@@ -594,34 +619,34 @@ inline void AudioReactive::createAudioSource() {
             #else
             DEBUGSR_PRINTLN(F("AR: WM8978 Source (Line-In)"));
             #endif
-            audioSource = new WM8978Source(SAMPLE_RATE, BLOCK_SIZE, 1.0f);
-            delay(100);
             if ((sdaPin >= 0) && (i2c_sda < 0)) i2c_sda = sdaPin;
             if ((sclPin >= 0) && (i2c_scl < 0)) i2c_scl = sclPin;
             if (i2c_sda >= 0) sdaPin = -1;
             if (i2c_scl >= 0) sclPin = -1;
+            audioSource = new WM8978Source(SAMPLE_RATE, BLOCK_SIZE, 1.0f, true, i2c_sda, i2c_scl, &m_pinAllocator);
+            delay(100);
             if (audioSource) audioSource->initialize(i2swsPin, i2ssdPin, i2sckPin, mclkPin);
             break;
 
         case 8:
             DEBUGSR_PRINTLN(F("AR: AC101 Source (Line-In)"));
-            audioSource = new AC101Source(SAMPLE_RATE, BLOCK_SIZE, 1.0f);
-            delay(100);
             if ((sdaPin >= 0) && (i2c_sda < 0)) i2c_sda = sdaPin;
             if ((sclPin >= 0) && (i2c_scl < 0)) i2c_scl = sclPin;
             if (i2c_sda >= 0) sdaPin = -1;
             if (i2c_scl >= 0) sclPin = -1;
+            audioSource = new AC101Source(SAMPLE_RATE, BLOCK_SIZE, 1.0f, true, i2c_sda, i2c_scl, &m_pinAllocator);
+            delay(100);
             if (audioSource) audioSource->initialize(i2swsPin, i2ssdPin, i2sckPin, mclkPin);
             break;
 
         case 9:
             DEBUGSR_PRINTLN(F("AR: ES8311 Source (Mic)"));
-            audioSource = new ES8311Source(SAMPLE_RATE, BLOCK_SIZE, 1.0f);
-            delay(100);
             if ((sdaPin >= 0) && (i2c_sda < 0)) i2c_sda = sdaPin;
             if ((sclPin >= 0) && (i2c_scl < 0)) i2c_scl = sclPin;
             if (i2c_sda >= 0) sdaPin = -1;
             if (i2c_scl >= 0) sclPin = -1;
+            audioSource = new ES8311Source(SAMPLE_RATE, BLOCK_SIZE, 1.0f, true, i2c_sda, i2c_scl, &m_pinAllocator);
+            delay(100);
             if (audioSource) audioSource->initialize(i2swsPin, i2ssdPin, i2sckPin, mclkPin);
             break;
 
@@ -637,7 +662,7 @@ inline void AudioReactive::createAudioSource() {
         case 0:
         default:
             DEBUGSR_PRINTLN(F("AR: Analog Microphone (left channel only)."));
-            audioSource = new I2SAdcSource(SAMPLE_RATE, BLOCK_SIZE);
+            audioSource = new I2SAdcSource(SAMPLE_RATE, BLOCK_SIZE, 1.0f, &m_pinAllocator);
             delay(100);
             if (audioSource) audioSource->initialize(audioPin);
             break;

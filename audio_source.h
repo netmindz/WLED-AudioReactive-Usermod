@@ -2,6 +2,54 @@
 
 #include "audio_processor.h"  // for ISampleSource
 
+/* ---------------------------------------------------------------------------
+ * IPinAllocator — platform abstraction for GPIO pin management.
+ *
+ * audio_source.h uses this interface instead of calling WLED's PinManager
+ * directly, so that AudioSource subclasses have no WLED dependency.
+ * A concrete implementation (WLEDPinAllocator) is provided in audio_reactive.h.
+ * ---------------------------------------------------------------------------*/
+class IPinAllocator {
+public:
+    /* Reserve a GPIO pin.  Returns true on success.
+     * output == true  → pin will be driven as output.
+     * output == false → pin will be used as input. */
+    virtual bool allocatePin(int8_t pin, bool output) = 0;
+
+    /* Release a previously allocated GPIO pin. */
+    virtual void deallocatePin(int8_t pin) = 0;
+
+    /* (Optional) Join the shared I2C bus with the given SDA/SCL pins.
+     * The default no-op is used by non-WLED hosts; WLED-MM overrides this
+     * with PinManager::joinWire() so that Wire is started with the correct pins. */
+    virtual bool joinWire(int8_t /*sda*/, int8_t /*scl*/) { return true; }
+
+    virtual ~IPinAllocator() = default;
+};
+
+/* ---------------------------------------------------------------------------
+ * Fallback debug-macro definitions for standalone compilation.
+ * When audio_source.h is included via audio_reactive.h these macros are
+ * already defined (with optional WLED output).  The #ifndef guards below make
+ * audio_source.h compile cleanly on its own (e.g. in unit tests or a plain
+ * Arduino sketch) by falling back to no-ops.
+ * ---------------------------------------------------------------------------*/
+#ifndef DEBUGSR_PRINT
+  #define DEBUGSR_PRINT(x)
+  #define DEBUGSR_PRINTLN(x)
+  #define DEBUGSR_PRINTF(x...)
+#endif
+#ifndef ERRORSR_PRINT
+  #define ERRORSR_PRINT(x)
+  #define ERRORSR_PRINTLN(x)
+  #define ERRORSR_PRINTF(x...)
+#endif
+#ifndef USER_PRINT
+  #define USER_PRINT(x)
+  #define USER_PRINTLN(x)
+  #define USER_PRINTF(x...)
+#endif
+
 /* 
    @title     MoonModules WLED - audioreactive usermod
    @file      audio_source.h
@@ -195,8 +243,9 @@ class AudioSource : public ISampleSource {
 */
 class I2SSource : public AudioSource {
   public:
-    I2SSource(SRate_t sampleRate, int blockSize, float sampleScale = 1.0f, bool i2sMaster=true) :
-      AudioSource(sampleRate, blockSize, sampleScale, i2sMaster) {
+    I2SSource(SRate_t sampleRate, int blockSize, float sampleScale = 1.0f, bool i2sMaster=true, IPinAllocator* pinAllocator = nullptr) :
+      AudioSource(sampleRate, blockSize, sampleScale, i2sMaster),
+      m_pinAllocator(pinAllocator) {
       _config = {
         .mode = i2sMaster ? i2s_mode_t(I2S_MODE_MASTER | I2S_MODE_RX) : i2s_mode_t(I2S_MODE_SLAVE | I2S_MODE_RX),
         .sample_rate = _sampleRate,
@@ -242,8 +291,7 @@ class I2SSource : public AudioSource {
     virtual void initialize(int8_t i2swsPin = I2S_PIN_NO_CHANGE, int8_t i2ssdPin = I2S_PIN_NO_CHANGE, int8_t i2sckPin = I2S_PIN_NO_CHANGE, int8_t mclkPin = I2S_PIN_NO_CHANGE) {
       DEBUGSR_PRINTLN("I2SSource:: initialize().");
       if (i2swsPin != I2S_PIN_NO_CHANGE && i2ssdPin != I2S_PIN_NO_CHANGE) {
-        if (!PinManager::allocatePin(i2swsPin, true, PinOwner::UM_Audioreactive) ||
-            !PinManager::allocatePin(i2ssdPin, false, PinOwner::UM_Audioreactive)) { // #206
+        if (!_allocatePin(i2swsPin, true) || !_allocatePin(i2ssdPin, false)) { // #206
           ERRORSR_PRINTF("\nAR: Failed to allocate I2S pins: ws=%d, sd=%d\n",  i2swsPin, i2ssdPin); 
           return;
         }
@@ -251,7 +299,7 @@ class I2SSource : public AudioSource {
 
       // i2ssckPin needs special treatment, since it might be unused on PDM mics
       if (i2sckPin != I2S_PIN_NO_CHANGE) {
-        if (!PinManager::allocatePin(i2sckPin, true, PinOwner::UM_Audioreactive)) {
+        if (!_allocatePin(i2sckPin, true)) {
           ERRORSR_PRINTF("\nAR: Failed to allocate I2S pins: sck=%d\n",  i2sckPin); 
           return;
         }
@@ -305,21 +353,21 @@ class I2SSource : public AudioSource {
 #endif
 
       if (_i2sMaster == false) {
-        DEBUG_PRINTLN(F("AR: Warning - i2S SLAVE mode is experimental!"));
+        DEBUGSR_PRINTLN(F("AR: Warning - i2S SLAVE mode is experimental!"));
         if (_config.mode & I2S_MODE_PDM) {
           // APLL does not work in DAC or PDM "Slave Mode": https://github.com/espressif/esp-idf/issues/1244, https://github.com/espressif/esp-idf/issues/2634
           _config.use_apll = false;
           _config.fixed_mclk =  0;
         }
         if ((_config.mode & I2S_MODE_MASTER) != 0) {
-          DEBUG_PRINTLN("AR: (oops) I2S SLAVE mode requested but not configured!");
+          DEBUGSR_PRINTLN("AR: (oops) I2S SLAVE mode requested but not configured!");
         }
       }
 
       // Reserve the master clock pin if provided
       _mclkPin = mclkPin;
       if (mclkPin != I2S_PIN_NO_CHANGE) {
-        if(!PinManager::allocatePin(mclkPin, true, PinOwner::UM_Audioreactive)) { 
+        if(!_allocatePin(mclkPin, true)) { 
           ERRORSR_PRINTF("\nAR: Failed to allocate I2S pin: MCLK=%d\n",  mclkPin); 
           return;
         } else
@@ -381,11 +429,11 @@ class I2SSource : public AudioSource {
         DEBUGSR_PRINTF("Failed to uninstall i2s driver: %d\n", err);
         return;
       }
-      if (_pinConfig.ws_io_num   != I2S_PIN_NO_CHANGE) PinManager::deallocatePin(_pinConfig.ws_io_num,   PinOwner::UM_Audioreactive);
-      if (_pinConfig.data_in_num != I2S_PIN_NO_CHANGE) PinManager::deallocatePin(_pinConfig.data_in_num, PinOwner::UM_Audioreactive);
-      if (_pinConfig.bck_io_num  != I2S_PIN_NO_CHANGE) PinManager::deallocatePin(_pinConfig.bck_io_num,  PinOwner::UM_Audioreactive);
+      if (_pinConfig.ws_io_num   != I2S_PIN_NO_CHANGE) _deallocatePin(_pinConfig.ws_io_num);
+      if (_pinConfig.data_in_num != I2S_PIN_NO_CHANGE) _deallocatePin(_pinConfig.data_in_num);
+      if (_pinConfig.bck_io_num  != I2S_PIN_NO_CHANGE) _deallocatePin(_pinConfig.bck_io_num);
       // Release the master clock pin
-      if (_mclkPin != I2S_PIN_NO_CHANGE) PinManager::deallocatePin(_mclkPin, PinOwner::UM_Audioreactive);
+      if (_mclkPin != I2S_PIN_NO_CHANGE) _deallocatePin(_mclkPin);
     }
 
     virtual void getSamples(float *buffer, uint16_t num_samples) {
@@ -427,6 +475,19 @@ class I2SSource : public AudioSource {
     }
 
   protected:
+    /* Pin allocation helpers — delegate to IPinAllocator if one was provided,
+     * otherwise log a warning and skip (safe for unit-test / non-WLED builds). */
+    bool _allocatePin(int8_t pin, bool output) {
+      if (m_pinAllocator) return m_pinAllocator->allocatePin(pin, output);
+      ERRORSR_PRINTF("AR: no IPinAllocator — skipping allocatePin(%d)\n", pin);
+      return true;  // allow initialisation to proceed without a WLED host
+    }
+    void _deallocatePin(int8_t pin) {
+      if (m_pinAllocator) m_pinAllocator->deallocatePin(pin);
+    }
+
+    IPinAllocator* m_pinAllocator;  // injected by caller; may be nullptr in tests
+
     void _routeMclk(int8_t mclkPin) {
 #if !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(CONFIG_IDF_TARGET_ESP32C3) && !defined(CONFIG_IDF_TARGET_ESP32S3)
   // MCLK routing by writing registers is not needed any more with IDF > 4.4.0
@@ -489,8 +550,10 @@ class ES7243 : public I2SSource {
     }
 
 public:
-    ES7243(SRate_t sampleRate, int blockSize, float sampleScale = 1.0f, bool i2sMaster=true) :
-      I2SSource(sampleRate, blockSize, sampleScale, i2sMaster) {
+    ES7243(SRate_t sampleRate, int blockSize, float sampleScale = 1.0f, bool i2sMaster=true,
+           int8_t sdaPin = -1, int8_t sclPin = -1, IPinAllocator* pinAllocator = nullptr) :
+      I2SSource(sampleRate, blockSize, sampleScale, i2sMaster, pinAllocator),
+      _sdaPin(sdaPin), _sclPin(sclPin) {
       _config.channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT;
     };
 
@@ -501,13 +564,13 @@ public:
       //   ERRORSR_PRINTF("\nAR: invalid I2S pin: SCK=%d, MCLK=%d\n", i2sckPin, mclkPin);
       //   return;
       // }
-      if ((i2c_sda < 0) || (i2c_scl < 0)) {  // check that global I2C pins are not "undefined"
-        ERRORSR_PRINTF("\nAR: invalid ES7243 global I2C pins: SDA=%d, SCL=%d\n", i2c_sda, i2c_scl); 
+      if ((_sdaPin < 0) || (_sclPin < 0)) {  // check that I2C pins are not "undefined"
+        ERRORSR_PRINTF("\nAR: invalid ES7243 I2C pins: SDA=%d, SCL=%d\n", _sdaPin, _sclPin); 
         return;
       }
 #ifdef WLEDMM
-      if (!PinManager::joinWire(i2c_sda, i2c_scl)) {    // WLEDMM specific: start I2C with globally defined pins
-        ERRORSR_PRINTF("\nAR: failed to join I2C bus with SDA=%d, SCL=%d\n", i2c_sda, i2c_scl); 
+      if (!m_pinAllocator->joinWire(_sdaPin, _sclPin)) {    // WLEDMM specific: start I2C with globally defined pins
+        ERRORSR_PRINTF("\nAR: failed to join I2C bus with SDA=%d, SCL=%d\n", _sdaPin, _sclPin); 
         return;
       }
 #endif
@@ -519,6 +582,10 @@ public:
     void deinitialize() {
       I2SSource::deinitialize();
     }
+
+  private:
+    int8_t _sdaPin;
+    int8_t _sclPin;
 };
 
 /* ES8388 Sound Module
@@ -618,8 +685,10 @@ class ES8388Source : public I2SSource {
     }
 
   public:
-    ES8388Source(SRate_t sampleRate, int blockSize, float sampleScale = 1.0f, bool i2sMaster=true) :
-      I2SSource(sampleRate, blockSize, sampleScale, i2sMaster) {
+    ES8388Source(SRate_t sampleRate, int blockSize, float sampleScale = 1.0f, bool i2sMaster=true,
+                 int8_t sdaPin = -1, int8_t sclPin = -1, IPinAllocator* pinAllocator = nullptr) :
+      I2SSource(sampleRate, blockSize, sampleScale, i2sMaster, pinAllocator),
+      _sdaPin(sdaPin), _sclPin(sclPin) {
       _config.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
     };
 
@@ -633,13 +702,13 @@ class ES8388Source : public I2SSource {
       // BUG: "use global I2C pins" are valid as -1, and -1 is seen as invalid here.
       // Workaround: Set I2C pins here, which will also set them globally.
       // Bug also exists in ES7243.
-       if ((i2c_sda < 0) || (i2c_scl < 0)) {  // check that global I2C pins are not "undefined"
-        ERRORSR_PRINTF("\nAR: invalid ES8388 global I2C pins: SDA=%d, SCL=%d\n", i2c_sda, i2c_scl); 
+       if ((_sdaPin < 0) || (_sclPin < 0)) {  // check that I2C pins are not "undefined"
+        ERRORSR_PRINTF("\nAR: invalid ES8388 I2C pins: SDA=%d, SCL=%d\n", _sdaPin, _sclPin); 
         return;
       }
 #ifdef WLEDMM
-      if (!PinManager::joinWire(i2c_sda, i2c_scl)) {    // WLEDMM specific: start I2C with globally defined pins
-        ERRORSR_PRINTF("\nAR: failed to join I2C bus with SDA=%d, SCL=%d\n", i2c_sda, i2c_scl); 
+      if (!m_pinAllocator->joinWire(_sdaPin, _sclPin)) {    // WLEDMM specific: start I2C with globally defined pins
+        ERRORSR_PRINTF("\nAR: failed to join I2C bus with SDA=%d, SCL=%d\n", _sdaPin, _sclPin); 
         return;
       }
 #endif
@@ -653,6 +722,9 @@ class ES8388Source : public I2SSource {
       I2SSource::deinitialize();
     }
 
+  private:
+    int8_t _sdaPin;
+    int8_t _sclPin;
 };
 
 /* ES8311 Sound Module
@@ -718,8 +790,10 @@ class ES8311Source : public I2SSource {
     }
 
   public:
-    ES8311Source(SRate_t sampleRate, int blockSize, float sampleScale = 1.0f, bool i2sMaster=true) :
-      I2SSource(sampleRate, blockSize, sampleScale, i2sMaster) {
+    ES8311Source(SRate_t sampleRate, int blockSize, float sampleScale = 1.0f, bool i2sMaster=true,
+                 int8_t sdaPin = -1, int8_t sclPin = -1, IPinAllocator* pinAllocator = nullptr) :
+      I2SSource(sampleRate, blockSize, sampleScale, i2sMaster, pinAllocator),
+      _sdaPin(sdaPin), _sclPin(sclPin) {
       _config.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
     };
 
@@ -733,13 +807,13 @@ class ES8311Source : public I2SSource {
       // BUG: "use global I2C pins" are valid as -1, and -1 is seen as invalid here.
       // Workaround: Set I2C pins here, which will also set them globally.
       // Bug also exists in ES7243.
-       if ((i2c_sda < 0) || (i2c_scl < 0)) {  // check that global I2C pins are not "undefined"
-        ERRORSR_PRINTF("\nAR: invalid es8311 global I2C pins: SDA=%d, SCL=%d\n", i2c_sda, i2c_scl); 
+       if ((_sdaPin < 0) || (_sclPin < 0)) {  // check that I2C pins are not "undefined"
+        ERRORSR_PRINTF("\nAR: invalid es8311 I2C pins: SDA=%d, SCL=%d\n", _sdaPin, _sclPin); 
         return;
       }
 #ifdef WLEDMM
-      if (!PinManager::joinWire(i2c_sda, i2c_scl)) {    // WLEDMM specific: start I2C with globally defined pins
-        ERRORSR_PRINTF("\nAR: failed to join I2C bus with SDA=%d, SCL=%d\n", i2c_sda, i2c_scl); 
+      if (!m_pinAllocator->joinWire(_sdaPin, _sclPin)) {    // WLEDMM specific: start I2C with globally defined pins
+        ERRORSR_PRINTF("\nAR: failed to join I2C bus with SDA=%d, SCL=%d\n", _sdaPin, _sclPin); 
         return;
       }
 #endif
@@ -753,6 +827,9 @@ class ES8311Source : public I2SSource {
       I2SSource::deinitialize();
     }
 
+  private:
+    int8_t _sdaPin;
+    int8_t _sclPin;
 };
 
 class WM8978Source : public I2SSource {
@@ -816,8 +893,10 @@ class WM8978Source : public I2SSource {
     }
 
   public:
-    WM8978Source(SRate_t sampleRate, int blockSize, float sampleScale = 1.0f, bool i2sMaster=true) :
-      I2SSource(sampleRate, blockSize, sampleScale, i2sMaster) {
+    WM8978Source(SRate_t sampleRate, int blockSize, float sampleScale = 1.0f, bool i2sMaster=true,
+                 int8_t sdaPin = -1, int8_t sclPin = -1, IPinAllocator* pinAllocator = nullptr) :
+      I2SSource(sampleRate, blockSize, sampleScale, i2sMaster, pinAllocator),
+      _sdaPin(sdaPin), _sclPin(sclPin) {
       _config.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
     };
 
@@ -831,13 +910,13 @@ class WM8978Source : public I2SSource {
       // BUG: "use global I2C pins" are valid as -1, and -1 is seen as invalid here.
       // Workaround: Set I2C pins here, which will also set them globally.
       // Bug also exists in ES7243.
-       if ((i2c_sda < 0) || (i2c_scl < 0)) {  // check that global I2C pins are not "undefined"
-        ERRORSR_PRINTF("\nAR: invalid WM8978 global I2C pins: SDA=%d, SCL=%d\n", i2c_sda, i2c_scl); 
+       if ((_sdaPin < 0) || (_sclPin < 0)) {  // check that I2C pins are not "undefined"
+        ERRORSR_PRINTF("\nAR: invalid WM8978 I2C pins: SDA=%d, SCL=%d\n", _sdaPin, _sclPin); 
         return;
       }
 #ifdef WLEDMM
-      if (!PinManager::joinWire(i2c_sda, i2c_scl)) {    // WLEDMM specific: start I2C with globally defined pins
-        ERRORSR_PRINTF("\nAR: failed to join I2C bus with SDA=%d, SCL=%d\n", i2c_sda, i2c_scl); 
+      if (!m_pinAllocator->joinWire(_sdaPin, _sclPin)) {    // WLEDMM specific: start I2C with globally defined pins
+        ERRORSR_PRINTF("\nAR: failed to join I2C bus with SDA=%d, SCL=%d\n", _sdaPin, _sclPin); 
         return;
       }
 #endif
@@ -850,6 +929,9 @@ class WM8978Source : public I2SSource {
       I2SSource::deinitialize();
     }
 
+  private:
+    int8_t _sdaPin;
+    int8_t _sclPin;
 };
 
 class AC101Source : public I2SSource {
@@ -920,8 +1002,10 @@ class AC101Source : public I2SSource {
     }
 
   public:
-    AC101Source(SRate_t sampleRate, int blockSize, float sampleScale = 1.0f, bool i2sMaster=true) :
-      I2SSource(sampleRate, blockSize, sampleScale, i2sMaster) {
+    AC101Source(SRate_t sampleRate, int blockSize, float sampleScale = 1.0f, bool i2sMaster=true,
+                int8_t sdaPin = -1, int8_t sclPin = -1, IPinAllocator* pinAllocator = nullptr) :
+      I2SSource(sampleRate, blockSize, sampleScale, i2sMaster, pinAllocator),
+      _sdaPin(sdaPin), _sclPin(sclPin) {
       _config.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
     };
 
@@ -935,13 +1019,13 @@ class AC101Source : public I2SSource {
       // BUG: "use global I2C pins" are valid as -1, and -1 is seen as invalid here.
       // Workaround: Set I2C pins here, which will also set them globally.
       // Bug also exists in ES7243.
-       if ((i2c_sda < 0) || (i2c_scl < 0)) {  // check that global I2C pins are not "undefined"
-        ERRORSR_PRINTF("\nAR: invalid AC101 global I2C pins: SDA=%d, SCL=%d\n", i2c_sda, i2c_scl); 
+       if ((_sdaPin < 0) || (_sclPin < 0)) {  // check that I2C pins are not "undefined"
+        ERRORSR_PRINTF("\nAR: invalid AC101 I2C pins: SDA=%d, SCL=%d\n", _sdaPin, _sclPin); 
         return;
       }
 #ifdef WLEDMM
-      if (!PinManager::joinWire(i2c_sda, i2c_scl)) {    // WLEDMM specific: start I2C with globally defined pins
-        ERRORSR_PRINTF("\nAR: failed to join I2C bus with SDA=%d, SCL=%d\n", i2c_sda, i2c_scl); 
+      if (!m_pinAllocator->joinWire(_sdaPin, _sclPin)) {    // WLEDMM specific: start I2C with globally defined pins
+        ERRORSR_PRINTF("\nAR: failed to join I2C bus with SDA=%d, SCL=%d\n", _sdaPin, _sclPin); 
         return;
       }
 #endif
@@ -954,6 +1038,9 @@ class AC101Source : public I2SSource {
       I2SSource::deinitialize();
     }
 
+  private:
+    int8_t _sdaPin;
+    int8_t _sclPin;
 };
 
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 2, 0)
@@ -972,8 +1059,9 @@ class AC101Source : public I2SSource {
 */
 class I2SAdcSource : public I2SSource {
   public:
-    I2SAdcSource(SRate_t sampleRate, int blockSize, float sampleScale = 1.0f) :
-      I2SSource(sampleRate, blockSize, sampleScale, true) {
+    I2SAdcSource(SRate_t sampleRate, int blockSize, float sampleScale = 1.0f,
+                 IPinAllocator* pinAllocator = nullptr) :
+      I2SSource(sampleRate, blockSize, sampleScale, true, pinAllocator) {
       _config = {
         .mode = i2s_mode_t(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_ADC_BUILT_IN),
         .sample_rate = _sampleRate,
@@ -999,7 +1087,7 @@ class I2SAdcSource : public I2SSource {
     void initialize(int8_t audioPin, int8_t = I2S_PIN_NO_CHANGE, int8_t = I2S_PIN_NO_CHANGE, int8_t = I2S_PIN_NO_CHANGE) {
       DEBUGSR_PRINTLN("I2SAdcSource:: initialize().");
       _myADCchannel = 0x0F;
-      if(!PinManager::allocatePin(audioPin, false, PinOwner::UM_Audioreactive)) {
+      if(!_allocatePin(audioPin, false)) {
          ERRORSR_PRINTF("failed to allocate GPIO for audio analog input: %d\n", audioPin);
         return;
       }
@@ -1127,7 +1215,7 @@ class I2SAdcSource : public I2SSource {
     }
 
     void deinitialize() {
-      PinManager::deallocatePin(_audioPin, PinOwner::UM_Audioreactive);
+      _deallocatePin(_audioPin);
       _initialized = false;
       _myADCchannel = 0x0F;
       
@@ -1164,8 +1252,9 @@ class I2SAdcSource : public I2SSource {
 // a user recommended this: Try to set .communication_format to I2S_COMM_FORMAT_STAND_I2S and call i2s_set_clk() after i2s_set_pin().
 class SPH0654 : public I2SSource {
   public:
-    SPH0654(SRate_t sampleRate, int blockSize, float sampleScale = 1.0f, bool i2sMaster=true) :
-      I2SSource(sampleRate, blockSize, sampleScale, i2sMaster)
+    SPH0654(SRate_t sampleRate, int blockSize, float sampleScale = 1.0f, bool i2sMaster=true,
+            IPinAllocator* pinAllocator = nullptr) :
+      I2SSource(sampleRate, blockSize, sampleScale, i2sMaster, pinAllocator)
     {}
 
     void initialize(int8_t i2swsPin, int8_t i2ssdPin, int8_t i2sckPin, int8_t = I2S_PIN_NO_CHANGE) {
