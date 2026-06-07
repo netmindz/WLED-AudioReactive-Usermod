@@ -78,8 +78,8 @@
 // Include our object-oriented audio processing libraries
 #include "audio_filters.h"
 #include "agc_controller.h"
-#include "audio_processor.h"
-#include "audio_source.h"
+#include "audio_source_factory.h"  // AudioSourceConfig, createAudioSource(), normalizeDmType()
+                                   // also transitively includes audio_source.h and audio_processor.h
 #include "audio_sync.h"
 
 /* ---------------------------------------------------------------------------
@@ -533,142 +533,38 @@ inline void AudioReactive::createAudioSource() {
         audioSource = nullptr;
     }
 
-    // Dummy user support: SCK == -1 (I2S_PIN_NO_CHANGE) with SD+WS defined on a non-PDM type
-    // is treated as a PDM microphone (matches main:1977-1978).
-    #if !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(CONFIG_IDF_TARGET_ESP32C3) && !defined(CONFIG_IDF_TARGET_ESP32S3)
-    if ((i2sckPin == I2S_PIN_NO_CHANGE) && (i2ssdPin >= 0) && (i2swsPin >= 0)
-        && ((dmType == 1) || (dmType == 4))) dmType = 51;
-    #endif
+    // Apply PDM auto-promotion and persist the resolved type so that logging,
+    // config saves, and the info page all reflect what was actually opened.
+    dmType = normalizeDmType(dmType, i2sckPin);
 
-    switch (dmType) {
-        // S2/C3/S3: ADC analog and some PDM modes not supported — fall through to generic I2S
-        #if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32S3)
-        case 0:  // ADC analog — not available on S2/C3/S3
-        #if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32C3)
-        case 5:  // PDM — not available on S2/C3
-        case 51: // Legacy PDM — not available on S2/C3
-        #endif
-        #endif
-        case 1:
-            DEBUGSR_PRINT(F("AR: Generic I2S Microphone - ")); DEBUGSR_PRINTLN(F(I2S_MIC_CHANNEL_TEXT));
-            audioSource = new I2SSource(SAMPLE_RATE, BLOCK_SIZE, 1.0f, true, &m_pinAllocator);
-            delay(100);
-            if (audioSource) audioSource->initialize(i2swsPin, i2ssdPin, i2sckPin);
-            break;
+    // Resolve I2C pins: codec types (ES7243, ES8388, WM8978, AC101, ES8311) can
+    // use either the dedicated sdaPin/sclPin fields or the WLED global i2c_sda/
+    // i2c_scl.  Merge them the same way the original code did (matches main:2003-2008).
+    if ((sdaPin >= 0) && (i2c_sda < 0)) i2c_sda = sdaPin;
+    if ((sclPin >= 0) && (i2c_scl < 0)) i2c_scl = sclPin;
+    if (i2c_sda >= 0) sdaPin = -1;
+    if (i2c_scl >= 0) sclPin = -1;
 
-        case 2:
-            DEBUGSR_PRINTLN(F("AR: ES7243 Microphone (right channel only)."));
-            // Align global I2C pins (matches main:2003-2008) before passing to constructor
-            if ((sdaPin >= 0) && (i2c_sda < 0)) i2c_sda = sdaPin;
-            if ((sclPin >= 0) && (i2c_scl < 0)) i2c_scl = sclPin;
-            if (i2c_sda >= 0) sdaPin = -1;
-            if (i2c_scl >= 0) sclPin = -1;
-            audioSource = new ES7243(SAMPLE_RATE, BLOCK_SIZE, 1.0f, true, i2c_sda, i2c_scl, &m_pinAllocator);
-            delay(100);
-            if (audioSource) audioSource->initialize(i2swsPin, i2ssdPin, i2sckPin, mclkPin);
-            break;
+    AudioSourceConfig cfg;
+    cfg.dmType    = dmType;
+    cfg.sampleRate = SAMPLE_RATE;
+    cfg.blockSize  = BLOCK_SIZE;
+    cfg.audioPin   = audioPin;
+    cfg.i2ssdPin   = i2ssdPin;
+    cfg.i2swsPin   = i2swsPin;
+    cfg.i2sckPin   = i2sckPin;
+    cfg.mclkPin    = mclkPin;
+    cfg.i2c_sda    = i2c_sda;
+    cfg.i2c_scl    = i2c_scl;
 
-        case 3:
-            DEBUGSR_PRINT(F("AR: SPH0645 Microphone - ")); DEBUGSR_PRINTLN(F(I2S_MIC_CHANNEL_TEXT));
-            audioSource = new SPH0654(SAMPLE_RATE, BLOCK_SIZE, 1.0f, true, &m_pinAllocator);
-            delay(100);
-            if (audioSource) audioSource->initialize(i2swsPin, i2ssdPin, i2sckPin);
-            break;
+    audioSource = ::createAudioSource(cfg, &m_pinAllocator);
 
-        case 4:
-            DEBUGSR_PRINT(F("AR: Generic I2S Microphone with Master Clock - ")); DEBUGSR_PRINTLN(F(I2S_MIC_CHANNEL_TEXT));
-            audioSource = new I2SSource(SAMPLE_RATE, BLOCK_SIZE, 1.0f/24.0f, true, &m_pinAllocator);
-            delay(100);
-            if (audioSource) audioSource->initialize(i2swsPin, i2ssdPin, i2sckPin, mclkPin);
-            break;
-
-        #if !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(CONFIG_IDF_TARGET_ESP32C3)
-        case 5:
-            DEBUGSR_PRINT(F("AR: I2S PDM Microphone - ")); DEBUGSR_PRINTLN(F(I2S_PDM_MIC_CHANNEL_TEXT));
-            audioSource = new I2SSource(SAMPLE_RATE, BLOCK_SIZE, 1.0f/4.0f, true, &m_pinAllocator);
-            delay(100);
-            if (audioSource) audioSource->initialize(i2swsPin, i2ssdPin);
-            break;
-
-        case 51:
-            DEBUGSR_PRINT(F("AR: Legacy PDM Microphone - ")); DEBUGSR_PRINTLN(F(I2S_PDM_MIC_CHANNEL_TEXT));
-            audioSource = new I2SSource(SAMPLE_RATE, BLOCK_SIZE, 1.0f, true, &m_pinAllocator);
-            delay(100);
-            if (audioSource) audioSource->initialize(i2swsPin, i2ssdPin);
-            break;
-        #endif
-
-        case 6:
-            #ifdef use_es8388_mic
-            DEBUGSR_PRINTLN(F("AR: ES8388 Source (Mic)"));
-            #else
-            DEBUGSR_PRINTLN(F("AR: ES8388 Source (Line-In)"));
-            #endif
-            if ((sdaPin >= 0) && (i2c_sda < 0)) i2c_sda = sdaPin;
-            if ((sclPin >= 0) && (i2c_scl < 0)) i2c_scl = sclPin;
-            if (i2c_sda >= 0) sdaPin = -1;
-            if (i2c_scl >= 0) sclPin = -1;
-            audioSource = new ES8388Source(SAMPLE_RATE, BLOCK_SIZE, 1.0f, true, i2c_sda, i2c_scl, &m_pinAllocator);
-            delay(100);
-            if (audioSource) audioSource->initialize(i2swsPin, i2ssdPin, i2sckPin, mclkPin);
-            break;
-
-        case 7:
-            #ifdef use_wm8978_mic
-            DEBUGSR_PRINTLN(F("AR: WM8978 Source (Mic)"));
-            #else
-            DEBUGSR_PRINTLN(F("AR: WM8978 Source (Line-In)"));
-            #endif
-            if ((sdaPin >= 0) && (i2c_sda < 0)) i2c_sda = sdaPin;
-            if ((sclPin >= 0) && (i2c_scl < 0)) i2c_scl = sclPin;
-            if (i2c_sda >= 0) sdaPin = -1;
-            if (i2c_scl >= 0) sclPin = -1;
-            audioSource = new WM8978Source(SAMPLE_RATE, BLOCK_SIZE, 1.0f, true, i2c_sda, i2c_scl, &m_pinAllocator);
-            delay(100);
-            if (audioSource) audioSource->initialize(i2swsPin, i2ssdPin, i2sckPin, mclkPin);
-            break;
-
-        case 8:
-            DEBUGSR_PRINTLN(F("AR: AC101 Source (Line-In)"));
-            if ((sdaPin >= 0) && (i2c_sda < 0)) i2c_sda = sdaPin;
-            if ((sclPin >= 0) && (i2c_scl < 0)) i2c_scl = sclPin;
-            if (i2c_sda >= 0) sdaPin = -1;
-            if (i2c_scl >= 0) sclPin = -1;
-            audioSource = new AC101Source(SAMPLE_RATE, BLOCK_SIZE, 1.0f, true, i2c_sda, i2c_scl, &m_pinAllocator);
-            delay(100);
-            if (audioSource) audioSource->initialize(i2swsPin, i2ssdPin, i2sckPin, mclkPin);
-            break;
-
-        case 9:
-            DEBUGSR_PRINTLN(F("AR: ES8311 Source (Mic)"));
-            if ((sdaPin >= 0) && (i2c_sda < 0)) i2c_sda = sdaPin;
-            if ((sclPin >= 0) && (i2c_scl < 0)) i2c_scl = sclPin;
-            if (i2c_sda >= 0) sdaPin = -1;
-            if (i2c_scl >= 0) sclPin = -1;
-            audioSource = new ES8311Source(SAMPLE_RATE, BLOCK_SIZE, 1.0f, true, i2c_sda, i2c_scl, &m_pinAllocator);
-            delay(100);
-            if (audioSource) audioSource->initialize(i2swsPin, i2ssdPin, i2sckPin, mclkPin);
-            break;
-
-        case 255: // falls through
-        case 254: // dummy "network receive only" driver (matches main:2098-2104)
-            if (audioSource) { delete audioSource; audioSource = nullptr; }
-            disableSoundProcessing = true;
-            audioSyncEnabled = AUDIOSYNC_REC; // force UDP receive mode
-            break;
-
-        #if !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(CONFIG_IDF_TARGET_ESP32C3) && !defined(CONFIG_IDF_TARGET_ESP32S3)
-        // ADC over I2S is only possible on "classic" ESP32
-        case 0:
-        default:
-            DEBUGSR_PRINTLN(F("AR: Analog Microphone (left channel only)."));
-            audioSource = new I2SAdcSource(SAMPLE_RATE, BLOCK_SIZE, 1.0f, &m_pinAllocator);
-            delay(100);
-            if (audioSource) audioSource->initialize(audioPin);
-            break;
-        #endif
+    // Network-receive-only modes (254/255) return nullptr and require WLED-
+    // specific state changes that cannot live inside the platform-neutral factory.
+    if (!audioSource && (dmType == 254 || dmType == 255)) {
+        disableSoundProcessing = true;
+        audioSyncEnabled = AUDIOSYNC_REC; // force UDP receive mode
     }
-    delay(250); // give microphone enough time to initialise (matches main:2118)
     #endif
 }
 
