@@ -8,9 +8,6 @@
 */
 
 #include "audio_processor.h"
-// audio_source.h is only needed when using AudioSource integration with WLED
-// For standalone usage, it's not required
-// #include "audio_source.h"
 #include "audio_filters.h"
 #include "agc_controller.h"
 
@@ -26,13 +23,6 @@
 // Helper function for float mapping
 static inline float mapf(float x, float in_min, float in_max, float out_min, float out_max) {
     return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
-}
-
-// Helper function for constraining values
-static inline float constrain(float val, float min_val, float max_val) {
-    if (val < min_val) return min_val;
-    if (val > max_val) return max_val;
-    return val;
 }
 
 // Pink noise frequency response correction tables
@@ -125,7 +115,7 @@ bool AudioProcessor::initialize() {
     return true;
 }
 
-void AudioProcessor::setAudioSource(AudioSource* source) {
+void AudioProcessor::setAudioSource(ISampleSource* source) {
     m_audioSource = source;
 }
 
@@ -517,7 +507,7 @@ void AudioProcessor::processSamples(float* samples, size_t count) {
         }
         #endif
 
-        FFT.majorPeak(m_fftMajorPeak, m_fftMagnitude);
+        FFT.majorPeak(&m_fftMajorPeak, &m_fftMagnitude);
         m_fftMagnitude *= wc;
 
         if (m_fftMajorPeak < ((float)m_config.sampleRate / m_config.fftSize)) {
@@ -847,7 +837,7 @@ void AudioProcessor::fftTask() {
             }
             #endif
 
-            FFT.majorPeak(m_fftMajorPeak, m_fftMagnitude);
+            FFT.majorPeak(&m_fftMajorPeak, &m_fftMagnitude);
             m_fftMagnitude *= wc;
 
             if (m_fftMajorPeak < ((float)m_config.sampleRate / m_config.fftSize)) {

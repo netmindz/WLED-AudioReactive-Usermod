@@ -14,8 +14,16 @@
 
 #include <Arduino.h>
 
+// Minimal abstract interface for audio sample acquisition.
+// AudioSource in audio_source.h inherits from this, allowing audio_processor.cpp
+// to call getSamples() without pulling in the WLED-coupled audio_source.h.
+class ISampleSource {
+public:
+    virtual void getSamples(float *buffer, uint16_t count) = 0;
+    virtual ~ISampleSource() = default;
+};
+
 // Forward declarations (actual headers not needed for standalone mode)
-class AudioSource;  // Defined in audio_source.h (WLED dependency)
 class AudioFilters;
 class AGCController;
 
@@ -85,7 +93,7 @@ public:
      * @brief Set audio source for processing
      * @param source Pointer to audio source
      */
-    void setAudioSource(AudioSource* source);
+    void setAudioSource(ISampleSource* source);
 
     /**
      * @brief Set audio filters for preprocessing
@@ -243,7 +251,7 @@ private:
     bool m_initialized = false;
 
     // Component references
-    AudioSource* m_audioSource = nullptr;
+    ISampleSource* m_audioSource = nullptr;
     AudioFilters* m_audioFilters = nullptr;
     AGCController* m_agcController = nullptr;
 

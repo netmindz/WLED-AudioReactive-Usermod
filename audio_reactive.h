@@ -16,47 +16,16 @@
 
 #include "wled.h"
 
-// Include our object-oriented audio processing libraries
-#include "audio_filters.h"
-#include "agc_controller.h"
-#include "audio_processor.h"
-#include "audio_source.h"
-#include "audio_sync.h"
-
-#ifdef ARDUINO_ARCH_ESP32
-#include <driver/i2s.h>
-#include <driver/adc.h>
-#include <math.h>
+// Fallback error codes absent from standard WLED (present in MoonModules/WLED-MM).
+// Using unused values above ERR_UNDERVOLT (32); the UI will show a non-zero error flag.
+#ifndef ERR_REBOOT_NEEDED
+  #define ERR_REBOOT_NEEDED   254
+#endif
+#ifndef ERR_POWEROFF_NEEDED
+  #define ERR_POWEROFF_NEEDED 253
 #endif
 
-#if defined(ARDUINO_ARCH_ESP32) && (defined(WLED_DEBUG) || defined(SR_DEBUG))
-#include <esp_timer.h>
-#endif
-
-/*
- * Usermods allow you to add own functionality to WLED more easily
- * See: https://github.com/Aircoookie/WLED/wiki/Add-own-functionality
- *
- * This is an audioreactive v2 usermod - REFACTORED to use object-oriented libraries.
- */
-
-// FFT Configuration
-#if defined(WLEDMM_FASTPATH) && defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32)
-#define FFT_USE_SLIDING_WINDOW
-#endif
-
-#define FFT_PREFER_EXACT_PEAKS
-//#define SR_STATS
-
-#if !defined(FFTTASK_PRIORITY)
-#if defined(WLEDMM_FASTPATH) && !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(CONFIG_IDF_TARGET_ESP32C3) && defined(ARDUINO_ARCH_ESP32)
-#define FFTTASK_PRIORITY 4
-#else
-#define FFTTASK_PRIORITY 1
-#endif
-#endif
-
-// Debug macros
+// Debug macros — must be defined before #include "audio_source.h" which uses them.
 // #define MIC_LOGGER
 // #define FFT_SAMPLING_LOG
 // #define SR_DEBUG
@@ -104,6 +73,46 @@
   #define PLOT_PRINTLN(x)
   #define PLOT_PRINTF(x...)
   #define PLOT_FLUSH()
+#endif
+
+// Include our object-oriented audio processing libraries
+#include "audio_filters.h"
+#include "agc_controller.h"
+#include "audio_processor.h"
+#include "audio_source.h"
+#include "audio_sync.h"
+
+#ifdef ARDUINO_ARCH_ESP32
+#include <driver/i2s.h>
+#include <driver/adc.h>
+#include <math.h>
+#endif
+
+#if defined(ARDUINO_ARCH_ESP32) && (defined(WLED_DEBUG) || defined(SR_DEBUG))
+#include <esp_timer.h>
+#endif
+
+/*
+ * Usermods allow you to add own functionality to WLED more easily
+ * See: https://github.com/Aircoookie/WLED/wiki/Add-own-functionality
+ *
+ * This is an audioreactive v2 usermod - REFACTORED to use object-oriented libraries.
+ */
+
+// FFT Configuration
+#if defined(WLEDMM_FASTPATH) && defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32)
+#define FFT_USE_SLIDING_WINDOW
+#endif
+
+#define FFT_PREFER_EXACT_PEAKS
+//#define SR_STATS
+
+#if !defined(FFTTASK_PRIORITY)
+#if defined(WLEDMM_FASTPATH) && !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(CONFIG_IDF_TARGET_ESP32C3) && defined(ARDUINO_ARCH_ESP32)
+#define FFTTASK_PRIORITY 4
+#else
+#define FFTTASK_PRIORITY 1
+#endif
 #endif
 
 // Sanity checks
@@ -1629,6 +1638,4 @@ inline void AudioReactive::addToJsonInfo(JsonObject& root) {
 #endif
     }
 }
-
-#endif // audio_reactive.h
 

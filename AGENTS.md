@@ -25,12 +25,13 @@ Two forks can be used; choose based on what you need to test:
 The reference OO code was ported from `MoonModules/WLED-MM main`, so
 **full parity verification requires the `WLED-MM` fork**.
 
-Clone whichever fork alongside this repo (sibling directory is conventional):
+Use a **fresh, clean clone** for build testing — do not reuse a checkout that
+has local modifications or a `platformio_override.ini` from another project:
 
 ```sh
-git clone --depth=1 https://github.com/MoonModules/WLED-MM.git ../WLED-MM
-# or
-git clone --depth=1 https://github.com/wled/WLED.git            ../WLED
+git clone --depth=1 https://github.com/wled/WLED.git /tmp/WLED
+# or, for full MoonModules parity:
+git clone --depth=1 https://github.com/MoonModules/WLED-MM.git /tmp/WLED-MM
 ```
 
 ---
@@ -115,16 +116,14 @@ git checkout -- usermods/audioreactive
 ## Known pre-existing issues to ignore
 
 The `examples/` directory in *this* repo contains a standalone `platformio.ini`
-for the OO library in isolation. It has two **pre-existing** build errors that
-exist on the unmodified branch and are unrelated to the OO refactor:
+for the OO library in isolation. It has a **pre-existing** build error that
+exists on the unmodified branch and is unrelated to the OO refactor:
 
-1. `arduinoFFT` fork mismatch — `examples/platformio.ini` pins
-   `kosme/arduinoFFT@2.0.1`; the library and WLED expect
-   `softhack007/arduinoFFT@1.9.2`. The API differs (`MajorPeak` signature).
-2. `audio_source.h` incomplete types — this header depends on WLED internals
-   (`WS2812FX`, `Segment`, etc.) that are not present in the examples build.
+1. `audio_source.h` incomplete types — this header depends on WLED internals
+   (`WS2812FX`, `Segment`, `PinManager`, etc.) that are not present in the
+   examples build.
 
-These errors appear when running `pio run` inside `examples/`. They do **not**
+This error appears when running `pio run` inside `examples/`. It does **not**
 appear in a full WLED build and should be ignored during integration testing.
 
 ---
@@ -132,12 +131,19 @@ appear in a full WLED build and should be ignored during integration testing.
 ## Quick-reference commands
 
 ```sh
-# Full WLED-MM build with the OO library (after creating platformio_override.ini)
-cd ../WLED-MM
-pio run -e esp32dev_oo 2>&1 | tail -30
+# Clone a clean WLED checkout (do not reuse an existing one)
+git clone --depth=1 https://github.com/wled/WLED.git /tmp/WLED
 
-# Check only for compilation errors (no link/upload)
-pio run -e esp32dev_oo --target compiledb
+# Create the override file (replace the path with the absolute path to this repo)
+cat > /tmp/WLED/platformio_override.ini <<'EOF'
+[env:esp32dev_oo]
+extends = env:esp32dev
+custom_usermods = symlink:///absolute/path/to/WLED-AudioReactive-Usermod
+EOF
+
+# Build (zero errors = valid drop-in)
+cd /tmp/WLED
+pio run -e esp32dev_oo 2>&1 | tail -30
 
 # Diff the OO library against the original MoonModules main (for parity checks)
 diff /tmp/main_audio_reactive.h \

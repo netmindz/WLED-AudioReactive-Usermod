@@ -1,5 +1,7 @@
 #pragma once
 
+#include "audio_processor.h"  // for ISampleSource
+
 /* 
    @title     MoonModules WLED - audioreactive usermod
    @file      audio_source.h
@@ -133,7 +135,7 @@ constexpr i2s_port_t AR_I2S_PORT = I2S_NUM_0;       // I2S port to use (do not c
    This enables accessing all microphones with one single interface
    which simplifies the caller code
 */
-class AudioSource {
+class AudioSource : public ISampleSource {
   public:
     /* All public methods are virtual, so they can be overridden
        Everything but the destructor is also removed, to make sure each mic
